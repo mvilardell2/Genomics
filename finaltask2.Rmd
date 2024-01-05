@@ -1,0 +1,533 @@
+---
+title: "Appendix"
+subtitle: 'Genetic Association Studies - Final Exercise'
+author: "Marina Vilardell"
+output:  html_document
+---
+
+Set the working directory and load all the libraries needed for the study:
+```{r,warning=FALSE}
+setwd("C:/Users/MARINA/Documents/MASTER/GENOMICS/A_STUDIES")
+
+#----Libraries-------
+library(snpStats)
+library(SNPassoc)
+library(MASS)
+library(PredictABEL)
+library(ggplot2)
+```
+
+# Load data and exploration
+
+```{r}
+#------ Get data ---------
+#Genotype data
+ad.plink <- read.plink("ADNI")
+ad_fam<-read.table('ADNI.fam')
+
+#Phenotype data
+feno<-read.delim('adni_demographics.txt',sep="")
+head(feno)
+```
+
+```{r}
+#----- Data exploration---------
+names(ad.plink)
+
+#Store genotype, annotation and family in a new variables for downstream analysis
+genotype<-ad.plink$genotypes #genotype
+head(genotype)
+
+annotation<-ad.plink$map #annotation
+head(annotation)
+
+family<-ad.plink$fam #family
+head(family)
+```
+
+The feno file, contains phenotypic information for different sets of individuals that overlap with those in the genotype object. Before the analysis, we have to make sure that the individuals are in the same order in both datasets.
+
+```{r}
+dim(feno)
+dim(genotype)
+dim(ad_fam)
+```
+Note that the number of individuals differ from the feno and genotype and ad_fam files. That means that in the feno object there are more individuals that there are in the genotype, hence, the individuals that are not in the genotype have to be removed.
+
+```{r}
+# ---verify that both data sets (genotype and feno) are in the same order ---
+rownames(feno)<-feno$ID
+head(feno)
+
+rownames(ad_fam)<-ad_fam$V2
+head(ad_fam)
+
+# intersect the rownames of both data sets to get the same individuals
+ids <- intersect(rownames(ad_fam), rownames(feno))
+
+#order the feno object in function of the id order of the ad_fam. Note that ad_fam will have the same order than genotype.
+ad.feno <- feno[ids, ]
+identical(rownames(ad.feno), rownames(ad_fam))
+head(rownames(ad.feno))
+head(rownames(ad_fam))
+
+```
+
+# Descriptive Analysis of phenotype and covariates
+
+```{r}
+table(ad.feno$DISEASE_STATUS)
+
+summary(ad.feno$AGE)
+boxplot(ad.feno$AGE)
+title('Figure 1. Boxplot of AGE variable')
+
+table(ad.feno$REPORTED_SEX)
+barplot(table(ad.feno$REPORTED_SEX))
+title('Figure 2. Barplot of SEX variable')
+
+table(ad.feno$REPORTED_SEX,ad.feno$DISEASE_STATUS)
+
+summary(ad.feno$YEARS_EDUCATION)
+table(ad.feno$APOE4)
+```
+
+# Quality Control 
+
+## QC of SNPs
+
+We now perform the quality control (QC) of genomic data at the SNP and individual levels, before association testing. Different measures can be used to perform QC (SNPs with a high rate of missing; rare SNPS (those that have a low minor allele frequency (MAF)); and SNPs that do not pass the HWE test).
+
+Summary of SNP information:
+```{r}
+info.snps <- col.summary(genotype)
+head(info.snps)
+dim(genotype)
+```
+
+We have to select the control patients to apply the HWE test. Controls are CN and LMCI Disease status classified patients. 
+```{r}
+table(ad.feno$DISEASE_STATUS)
+controls <- ad.feno$DISEASE_STATUS =='CN' | ad.feno$DISEASE_STATUS=='LMCI' & !is.na(ad.feno$DISEASE_STATUS)
+table(controls)
+geno.controls <- genotype[controls,]
+info.controls <- col.summary(geno.controls)
+
+
+# --- Filter SNPS according to the QC criteria ---
+use <- info.snps$Call.rate > 0.95 &
+  info.snps$MAF > 0.05 &
+  abs(info.controls$z.HWE < 3.3) 
+
+mask.snps <- use & !is.na(use)
+#It returns a logical vector
+
+#Count how many SNPs we remove
+sum(info.snps$Call.rate < 0.95) #42467 SNPs do not pass the Call.rate criteria
+sum(info.snps$MAF < 0.05, na.rm=TRUE) #58344 do not pass the MAF criteria
+sum(abs(info.controls$z.HWE > 3.3), na.rm=TRUE) #268 do not pass the HWE criteria
+
+#Select the genotye of those SNPs that pass the filter
+geno.qc.snps <- genotype[ , mask.snps]
+geno.qc.snps
+
+#Check the SNPs are in same order
+identical(rownames(info.snps),rownames(annotation))
+
+annotation <- annotation[mask.snps, ]
+head(annotation)
+
+#Total number of SNPs that do not pass Quality control
+sum(!mask.snps) #99112
+```
+
+## QC of individuals
+
+Quality control of individuals mainly comprises four steps: identification of sex discordancies, individuals with missing genotype or heterozygosity rate, duplicated individuals and individuals of divergent ancestry.
+
+Obtain the call rate and the proportion of SNPs which are heterozygous per each patient: 
+```{r}
+rownames(geno.qc.snps)<-rownames(ad_fam)
+info.indv <- row.summary(geno.qc.snps)
+head(info.indv)
+```
+
+### Sex discrepancies
+
+```{r}
+geno.X <- geno.qc.snps[,annotation$chromosome=="23" & 
+                         !is.na(annotation$chromosome)]
+info.X <- row.summary(geno.X)
+mycol <- ifelse(ad.feno$REPORTED_SEX=="Male", "red", "gray80")
+
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+
+plot(info.X$Heterozygosity, col=mycol, 
+     pch=16, xlab="Individuals", 
+     main='Figure 3. Sex discrepancies',
+     ylab="Heterozygosity in chromosome X")
+legend('topright',inset=c(-0.25, 0),c('Males','Females'),col=c('red','gray80'),pch=16)
+```
+
+```{r}
+sex.discrep <- (ad.feno$REPORTED_SEX=="Male" & info.X$Heterozygosity > 0.25) |  
+  (ad.feno$REPORTED_SEX=="Female" & info.X$Heterozygosity < 0.25) 
+table(sex.discrep)
+```
+There is no sex discrepancy in our data.
+
+
+### Heterozygosity
+
+```{r}
+MAF <- col.summary(geno.qc.snps)$MAF
+callmatrix <- !is.na(geno.qc.snps)
+hetExp <- callmatrix %*% (2*MAF*(1-MAF))
+hetObs <- with(info.indv, Heterozygosity*(ncol(geno.qc.snps))*Call.rate)
+info.indv$hetF <- 1-(hetObs/hetExp)
+
+head(info.indv)
+```
+
+### Duplicated or related individuals
+
+We need to remove those individuals that are closely related to other individuals, as they won't be representative of the sample.
+
+```{r,Duplicated,message=FALSE}
+library(SNPRelate)
+
+ snpgdsBED2GDS("ADNI.bed",
+               "ADNI.fam",
+               "ADNI.bim",
+               out="ADGDS")
+
+genofile <- snpgdsOpen("ADGDS")
+
+
+```
+
+```{r}
+# Prune SNPs for IBD analysis
+set.seed(12345)
+snps.qc <- colnames(geno.qc.snps)
+snp.prune <- snpgdsLDpruning(genofile, ld.threshold = 0.2,
+                             snp.id = snps.qc)
+
+snps.ibd <- unlist(snp.prune, use.names=FALSE)
+
+ibd <- snpgdsIBDMoM(genofile, kinship=TRUE,
+                    snp.id = snps.ibd,
+                    num.thread = 1)
+
+ibd.kin <- snpgdsIBDSelection(ibd) 
+head(ibd.kin)
+
+#A pair of individuals with higher than expected relatedness are considered with kinship score over 0.1
+ibd.kin.thres <- subset(ibd.kin, kinship > 0.1)
+head(ibd.kin.thres) #3 individuals with relationship
+
+ids.rel <-  SNPassoc::related(ibd.kin.thres) 
+
+```
+
+To sum up, individuals with more than 5% of missing genotypes, F absolute value > 1, and kinship coefficient >0.1 are removed from the genotype and phenotype data.
+
+```{r}
+use <- info.indv$Call.rate > 0.95 &
+  abs(info.indv$hetF) < 0.1 &
+  !rownames(info.indv)%in%ids.rel
+mask.indiv <- use & !is.na(use)
+geno.qc <- geno.qc.snps[mask.indiv, ]
+dim(geno.qc)
+
+ad.fn.qc <- ad.feno[mask.indiv, ]
+identical(rownames(ad.fn.qc), rownames(geno.qc))
+
+rownames(geno.qc)<-ad.fn.qc$ID
+identical(rownames(ad.fn.qc),rownames(geno.qc))
+```
+We keep with 736 individuals.
+
+Now, let's report the number of individuals that do not pass each QC.
+
+```{r}
+# --- Number of individuals removed to bad call rate ---
+sum(info.indv$Call.rate < 0.95) #1
+
+# --- Number of individuals removed for heterozygosity problems ---
+sum(abs(info.indv$hetF) > 0.1) #18
+
+# --- No sex discrepancies ---
+
+# --- Number of individuals removed to be related with others ---
+length(ids.rel) #3
+
+# --- Total of individuals that do not pass the Quality control ---
+sum(!mask.indiv) #21
+```
+
+### Ancestry
+
+Ancestral differences can be inferred with principal component analysis (PCA) on the genomic data. Individuals with outlying ancestry can be removed from the study while smaller differences in ancestry can be adjusted in the association models, including the first principal components as covariates.
+
+```{r}
+pca <- snpgdsPCA(genofile, sample.id = rownames(geno.qc),  
+                           snp.id = snps.ibd, 
+                           num.thread=1)
+
+#Plot PCA
+with(pca, plot(eigenvect[,1], eigenvect[,2], 
+              xlab="1st Principal Component", 
+               ylab="2nd Principal Component", 
+               main = "Figure 4. Ancestry Plot",
+               pch=21, bg="gray90", cex=0.8))
+
+ad.fn.qc <- data.frame(ad.fn.qc, pca$eigenvect[, 1:5])
+dim(ad.fn.qc)
+
+```
+
+Outlying individuals are on the right side of the plot with the first PC over 0.05. 
+
+# Association analysis
+
+Note that we are analyzing a categorical trait.
+```{r}
+ad.fn.qc$DISEASE_STATUS<-ifelse(ad.fn.qc$DISEASE_STATUS=='AD','1','0')
+
+res <- snp.rhs.tests(DISEASE_STATUS ~ AGE + REPORTED_SEX + YEARS_EDUCATION +APOE4 + X1 +X2, data=ad.fn.qc, snp.data=geno.qc,
+                     family="binomial")
+
+
+# --- Bonferroni correction ---
+
+#Significant threshold
+threshold<-0.05/length(res@snp.names)
+bonf.sig <- threshold
+ps <- p.value(res)
+significant_snps<-res[ps <= bonf.sig & !is.na(ps), ]
+
+```
+
+# Manhattan plot
+
+```{r,warning=FALSE}
+library(qqman)
+library(tidyverse)
+library(ggrepel)
+
+pvals <- data.frame(SNP=annotation$snp.name, 
+                    CHR=annotation$chromosome,
+                    BP=annotation$position,
+                    P=p.value(res))
+
+pvals$BP<-as.numeric(pvals$BP)
+pvals$CHR<-as.numeric((pvals$CHR))
+
+pvals <- subset(pvals, !is.na(CHR) & !is.na(P)) 
+subset_pvals <- subset(pvals, SNP %in% significant_snps@snp.names)
+
+manhattanPlot <- function(x, colors=c("grey", "skyblue"),
+                          significantLine = NULL, 
+                          snpsOfInterest=NULL, ...) {
+  
+  don <- x %>% 
+    
+    # Compute chromosome size
+    group_by(CHR) %>% 
+    dplyr::summarise(chr_len=max(BP)) %>% 
+    
+    # Calculate cumulative position of each chromosome
+    mutate(tot=cumsum(chr_len)-chr_len) %>%
+    dplyr::select(-chr_len) %>%
+    
+    # Add this info to the initial dataset
+    left_join(x, ., by=c("CHR"="CHR")) %>%
+    
+    # Add a cumulative position of each SNP
+    arrange(CHR, BP) %>%
+    mutate( BPcum=BP+tot) %>%
+    
+    # Add highlight and annotation information
+    mutate( is_highlight=ifelse(SNP %in% snpsOfInterest, "yes", "no")) %>%
+    mutate( is_annotate=ifelse(-log10(P)>=min(-log10(subset_pvals$P)), "yes", "no")) 
+  
+  # Prepare X axis
+  axisdf <- don %>% group_by(CHR) %>% dplyr::summarize(center=( max(BPcum) + min(BPcum) ) / 2 )
+  
+  # Make the plot
+  ggplot(don, aes(x=BPcum, y=-log10(P))) +
+    
+    # Show all points
+    geom_point( aes(color=as.factor(CHR)), alpha=0.8, size=1.3) +
+    scale_color_manual(values = rep(colors, 22 )) +
+    
+    # custom X axis:
+    scale_x_continuous( label = axisdf$CHR, breaks= axisdf$center ) +
+    scale_y_continuous(expand = c(0, 0),limits = c(0, 8)) +     # remove space between plot area and x axis
+    
+    # Add highlighted points
+    geom_point(data=subset(don, is_highlight=="yes"), color="red", size=2) +
+    
+    # Add label using ggrepel to avoid overlapping
+    geom_label_repel( data=subset(don, is_annotate=="yes"), aes(label=SNP), size=3) +
+    
+    # Change X-legend 
+    xlab("Chromosome") +
+    
+    # Add genome-wide line
+    geom_hline(yintercept = significantLine, linetype="dashed") +
+    
+    # Custom the theme:
+    theme_bw() +
+    ggtitle('Figure 5 . Manhattan plot')+
+    theme( 
+      legend.position="none",
+      panel.border = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank()
+    )
+}
+
+
+plt <- manhattanPlot(pvals, color=c("gray90", "gray40"),snpsOfInterest = subset_pvals$SNP)
+plt
+```
+
+
+# SNPs table
+
+```{r}
+library(biomaRt)
+# --- Select significant SNPs ---
+pval <- 5e-6
+ps <- p.value(res)
+significant_snps<-res[ps < pval & !is.na(ps), ]
+
+#Get chromosome, genomic position and p-value
+infosnps<-pvals
+subset_snp_info <- subset(pvals, SNP %in% significant_snps@snp.names)
+
+#Minor allele and its frequency
+MA<-annotation[subset_snp_info$SNP,]$allele.2
+info.snps.qc<-col.summary(geno.qc)
+MAF<-info.snps.qc[subset_snp_info$SNP,]$MAF
+
+# --- gene symbol---
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+gene_symbols<-NULL
+for (i in 1:nrow(subset_snp_info)){
+  ensembl_annotation <- getBM(
+  attributes = c("ensembl_gene_id", "external_gene_name"),
+  filters = c("chromosome_name", "start"),
+  values = list(subset_snp_info$CHR[i], subset_snp_info$BP[i]),
+  mart = ensembl
+ )
+gene_symbol <- ensembl_annotation$external_gene_name[1]
+gene_symbols <- c(gene_symbols,gene_symbol)
+  
+}
+
+# ---
+#OR under dominant, recessive, and additive model
+RA<-annotation[subset_snp_info$SNP,]$allele.1
+
+genotype_SNP<-data.frame(geno.qc@.Data[,subset_snp_info$SNP])
+genotype_SNP$rs10955311<-factor(genotype_SNP$rs10955311,levels=c('03','02','01'),labels=c('CC','CA','AA')) 
+genotype_SNP$rs1624922<-factor(genotype_SNP$rs1624922,levels=c('03','02','01'),labels=c('GG','GA','AA')) 
+
+genotype_SNP$rs11857713<-factor(genotype_SNP$rs11857713,levels=c('03','02','01'),labels=c('TT','TC','CC'))
+genotype_SNP$rs11253696<-factor(genotype_SNP$rs11253696,levels=c('03','02','01'),labels=c('AA','AG','GG'))
+genotype_SNP$rs4778636<-factor(genotype_SNP$rs4778636,levels=c('03','02','01'),labels=c('AA','AG','GG'))
+
+data<-data.frame(Patient=rownames(geno.qc@.Data),Disease=ad.fn.qc$DISEASE_STATUS,rs11253696=genotype_SNP$rs11253696, rs11857713=genotype_SNP$rs11857713,rs4778636=genotype_SNP$rs4778636,rs10955311=genotype_SNP$rs10955311,rs1624922=genotype_SNP$rs1624922)
+data.s<-setupSNP(data,3:7,sep="")
+rownames(data.s)<-data.s$Patient
+data.ss<-data.s[,-1]
+summary(data.ss)
+
+association(Disease ~ rs11857713,data=data.ss)
+association(Disease ~ rs11253696,data=data.ss)
+association(Disease ~ rs4778636,data=data.ss)
+association(Disease ~ rs10955311,data=data.ss)
+association(Disease ~ rs1624922,data=data.ss)
+
+odds.dominant<-odds(WGassociation(Disease,data.ss),model='dominant')
+odds.recessive<-odds(WGassociation(Disease,data.ss),model='recessive')
+odds.additive<-odds(WGassociation(Disease,data.ss),model='log-additive')
+
+
+res.table<-data.frame(SNP =subset_snp_info$SNP,P_value= subset_snp_info$P,Chromosome=subset_snp_info$CHR, Genomic_position=subset_snp_info$BP, Gene= gene_symbols, Minor_Allele=MA, Minor_Allele_Frequency=MAF,OR_Dominant=odds.dominant[subset_snp_info$SNP,]$OR,OR_Recessive=odds.recessive[subset_snp_info$SNP,]$OR,OR_Additive=odds.additive[subset_snp_info$SNP,]$OR)
+
+library(dplyr)
+res.table <- res.table %>%
+  arrange(P_value)
+
+res.table$P_value<-round(res.table$P_value,8)
+res.table$P_value<-as.character(res.table$P_value)
+
+library(kableExtra)
+kbl(res.table,caption='Table 1. Information of SNPs') %>%  kable_styling(bootstrap_options = c("striped", "hover","condensed"),full_width = T) %>% row_spec(0,background = 'khaki')
+
+```
+
+
+# Genetic score
+
+The SNPs to be included in a genetic score will be those that are the most associated with the trait (significant SNPs).
+
+```{r}
+
+data.ss2<-data.frame(lapply(data.ss,additive))
+rownames(data.ss2)<-rownames(data.ss)
+
+library(MASS)
+data.complete <- data.ss2[complete.cases(data.ss2),]#check there are no missing values
+mod <- stepAIC(glm(Disease ~ ., data.complete,
+                   family="binomial"),
+               method="forward", trace=0)
+
+# -- Genetic score computation ---
+summary(mod)
+
+```
+
+```{r}
+# select the snps to create the genetic score
+snps.score <- names(coef(mod))[-1]
+snps.score
+
+# Select the position of the SNPs in the data frame
+pos <- which(names(data.complete)%in%snps.score)
+pos
+
+# Compute the genetic score
+score <- riskScore(mod, data=data.complete, 
+                      cGenPreds=pos,
+                      Type="unweighted")
+#Table 2
+score
+
+table(score)
+
+# -- Association analysis with genetic scores ---
+mod.lin <- glm(Disease~score, data.complete,
+               family="binomial")
+summary(mod.lin)
+
+# The risk of having two risk alleles
+exp(coef(mod.lin)[2])
+
+# The risk of having 4 risk alleles
+exp(2*coef(mod.lin)[2])
+
+# The risk of having the 6 risk alleles
+exp(3*coef(mod.lin)[2])
+
+# Asses the power of the genetic score: 
+predrisk <- predRisk(mod.lin, data.complete)
+plotROC(data=data.complete, cOutcome=1,
+        predrisk = predrisk)
+title('Figure 6.                                 ')
+```
+
